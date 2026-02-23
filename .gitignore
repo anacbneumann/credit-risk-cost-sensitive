@@ -1,0 +1,38 @@
+# =========================
+# OS / Editor
+# =========================
+.DS_Store
+Thumbs.db
+
+# VS Code (config local)
+.vscode/
+*.code-workspace
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
+# =========================
+# R
+# =========================
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+*.Rproj
+
+# =========================
+# Conda / environments
+# =========================
+.conda/
+conda-meta/
+.env
+
+# =========================
+# Data (ignore ALL raw data)
+# =========================
+database/*
+# (Opcional) manter a pasta no Git mesmo vazia:
+!database/.gitkeep
