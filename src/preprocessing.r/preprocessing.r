@@ -57,3 +57,44 @@ dup_rows_no_id_sorted <- dup_rows_no_id[order(-dup_rows_no_id$age_years), ]
 head(dup_rows_no_id_sorted, 20)
 # Removing duplicated rows - keeping 1 of the duplicated rows
 cs_train_dedup <- cs_train[!duplicated(cs_train[, setdiff(names(cs_train), "id")]), ]
+
+
+'''
+3) preenchendo nan com mediana
+'''
+# Filling in null values ​​with the median
+df$monthly_income[is.na(df$monthly_income)] <- median(df$monthly_income, na.rm = TRUE)
+df$dependents_cnt[is.na(df$dependents_cnt)] <- median(df$dependents_cnt, na.rm = TRUE)
+head(df, 5)
+
+'''
+4) criar flags
+'''
+income_missing:  = nan
+dependents_missing:  = nan
+
+util_gt1: util_unsecured > 1
+util_gt10: util_unsecured > 10
+
+
+# Flag: debt ratio too high + missing income (suspicious)
+df$dr_unreliable <- df$income_missing & (df$debt_ratio > 100)
+
+# Flag: debt_ratio greater than 100
+df$dr_gt100 <- df$debt_ratio > 100
+
+
+'''
+5) Removendo linha onde age = 0
+'''
+# remove rows where age_years == 0
+df <- df[df$age_years != 0, ]
+
+# checagem rápida
+cat("Rows after removing age_years == 0:", nrow(df), "\n")
+
+'''
+6) Capar valores de debt_ratio
+'''
+# Transform the column values ​​into logarithms to normalize the gradient.
+df$debt_ratio <- log1p(df$debt_ratio)
