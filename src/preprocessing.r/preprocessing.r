@@ -98,3 +98,26 @@ cat("Rows after removing age_years == 0:", nrow(df), "\n")
 '''
 # Transform the column values ​​into logarithms to normalize the gradient.
 df$debt_ratio <- log1p(df$debt_ratio)
+
+'''
+7) Capar dados maiores que 10 e aplicar log em util_unsecured
+'''
+# Applying log reduction to util_unsecured
+df$util_unsecured <- pmin(df$util_unsecured, 10)
+df$util_unsecured <- log1p(df$util_unsecured)
+
+'''
+8) Dados de age_years menores que 18 ou maiores que 120 deixar NA
+'''
+
+'''
+9) Capar dependent_counts acima de 10 em 10
+'''
+cap_value <- max(df$dependents_cnt[df$dependents_cnt <= 10], na.rm = TRUE)
+cap_value
+
+df$dependents_cnt <- ifelse(
+  is.na(df$dependents_cnt),
+  NA_integer_,
+  pmin(df$dependents_cnt, cap_value)
+)
