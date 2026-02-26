@@ -9,15 +9,15 @@
 #   pipeline. Parameters are centralized in a single PARAMS dict for easy tuning.
 #
 # Inputs:
-#   - CSV file path (default: data/cs_train.csv)
+#   - CSV file path (default: database/cs-training.csv)
 #
 # Outputs:
-#   - Parquet raw dataset      (default: data/processed/cs_train_raw.parquet)
-#   - Parquet processed dataset (default: data/processed/cs_train_processed.parquet)
+#   - CSV raw dataset       (default: database/processed/cs_train_raw.csv)
+#   - CSV processed dataset (default: database/processed/cs_train_processed.csv)
 #
 # Typical usage:
 #   python 01_preprocessing.py
-#   python 01_preprocessing.py data/cs_train.csv data/processed
+#   python 01_preprocessing.py database/cs-training.csv database/processed
 # ==============================
 
 # ── Standard library ──────────────────────────────────────────────────────────
@@ -42,10 +42,11 @@ from src.auxiliary.preprocessing_utils import (
     clean_age,
     build_debt_ratio_features,
     build_income_features,
+    build_dpd_severity,
     median_impute,
     cap_dependents,
     build_real_estate_bucket,
-    # append_to_db_example,  # Example when DB integration is needed
+    # append_to_db_example,  # Uncomment when DB integration is needed
 )
 
 
@@ -70,6 +71,29 @@ PARAMS: dict = {
 
     "impute_round_counts": True,
 }
+
+# Columns removed at the end of the pipeline based on post-EDA decisions:
+# low predictive power, high multicollinearity, or superseded by derived features.
+# real_estate_bucket_grp is listed defensively — it may not exist in all runs.
+COLS_TO_DROP: list[str] = [
+    "dr_unreliable",
+    "util_gt10",
+    "income_extreme_flag",
+    "dpd_30_59_cnt",
+    "dpd_60_89_cnt",
+    "dpd_90p_cnt",
+    "monthly_income",
+    "monthly_income_cap",
+    "debt_ratio_cap100",
+    "debt_ratio",
+    "real_estate_cnt",
+    "real_estate_bucket",
+    "dpd_any_gt90",
+    "debt_ratio_cap100_log",
+    "dependents_missing",
+    "dr_bucket",
+    "real_estate_bucket_grp",
+]
 
 
 # ==============================================================================
@@ -142,8 +166,9 @@ def main(argv: list[str] | None = None) -> dict[str, pd.DataFrame]:
     Summary:
         Orchestrates the full sequence of preprocessing steps — column renaming,
         deduplication, missing flags, DPD cleaning, outlier transforms, age
-        cleaning, derived feature construction, median imputation, and bucketing —
-        then persists both the raw and processed DataFrames as Parquet files.
+        cleaning, derived feature construction (including DPD severity), median
+        imputation, bucketing, and final column selection — then persists both
+        the raw and processed DataFrames as CSV files.
 
     Args:
         argv: Optional argument list forwarded to :func:`parse_args`. When
@@ -199,7 +224,13 @@ def main(argv: list[str] | None = None) -> dict[str, pd.DataFrame]:
     )
 
     # ------------------------------------------------------------------
-    # 5) util_unsecured: outlier flags + cap + log1p transform
+    # 5) DPD severity ordinal (0–3) — must run AFTER flag_and_clean_dpd
+    # ------------------------------------------------------------------
+    df = build_dpd_severity(df)
+    log_info("dpd_severity created (0 = none, 1 = 30-59d, 2 = 60-89d, 3 = 90d+).")
+
+    # ------------------------------------------------------------------
+    # 6) util_unsecured: outlier flags + cap + log1p transform
     # ------------------------------------------------------------------
     df = flag_util_outliers(df, util_cap=PARAMS["util_cap"])
     log_info(
@@ -208,7 +239,7 @@ def main(argv: list[str] | None = None) -> dict[str, pd.DataFrame]:
     )
 
     # ------------------------------------------------------------------
-    # 6) Age cleaning
+    # 7) Age cleaning
     # ------------------------------------------------------------------
     df = clean_age(
         df,
@@ -218,7 +249,7 @@ def main(argv: list[str] | None = None) -> dict[str, pd.DataFrame]:
     )
 
     # ------------------------------------------------------------------
-    # 7) Debt ratio derived features
+    # 8) Debt ratio derived features
     # ------------------------------------------------------------------
     df = build_debt_ratio_features(df)
     log_info(
@@ -227,12 +258,12 @@ def main(argv: list[str] | None = None) -> dict[str, pd.DataFrame]:
     )
 
     # ------------------------------------------------------------------
-    # 8) Income derived features (extreme flag + cap + log1p)
+    # 9) Income derived features (extreme flag + cap + log1p)
     # ------------------------------------------------------------------
     df = build_income_features(df, cap_p=PARAMS["income_cap_p"])
 
     # ------------------------------------------------------------------
-    # 9) Median imputation — after flags and caps are in place
+    # 10) Median imputation — after flags and caps are in place
     # ------------------------------------------------------------------
     df["monthly_income"] = median_impute(df["monthly_income"], round_to_int=False)
     df["dependents_cnt"] = median_impute(
@@ -241,16 +272,34 @@ def main(argv: list[str] | None = None) -> dict[str, pd.DataFrame]:
     log_info("Missing values imputed using median (monthly_income, dependents_cnt).")
 
     # ------------------------------------------------------------------
-    # 10) Dependents cap
+    # 11) Dependents cap
     # ------------------------------------------------------------------
     df = cap_dependents(df, cap_value=PARAMS["dependents_cap"])
     log_info(f"dependents_cnt capped at {PARAMS['dependents_cap']}.")
 
     # ------------------------------------------------------------------
-    # 11) Real estate bucket (discrete ordinal)
+    # 12) Real estate bucket (discrete ordinal)
     # ------------------------------------------------------------------
     df = build_real_estate_bucket(df)
     log_info("real_estate_bucket created (discrete bins).")
+
+    # ------------------------------------------------------------------
+    # 13) Drop columns not used in modelling (post-EDA decision)
+    # ------------------------------------------------------------------
+    cols_present = [c for c in COLS_TO_DROP if c in df.columns]
+    cols_missing = [c for c in COLS_TO_DROP if c not in df.columns]
+
+    df = df.drop(columns=cols_present)
+
+    if cols_missing:
+        log_info(
+            f"Columns listed in COLS_TO_DROP but not found (skipped): "
+            f"{cols_missing}"
+        )
+    log_info(
+        f"Dropped {len(cols_present)} columns. "
+        f"Remaining columns ({len(df.columns)}): {list(df.columns)}"
+    )
 
     # ------------------------------------------------------------------
     # Save outputs

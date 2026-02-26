@@ -17,9 +17,11 @@
 #       rename_credit_columns, create_missing_flags,
 #       flag_util_outliers, flag_and_clean_dpd,
 #       build_debt_ratio_features, build_income_features,
+#       build_dpd_severity,
 #   )
 #   df = rename_credit_columns(df)
 #   df = create_missing_flags(df)
+#   df = build_dpd_severity(df)
 #   ...
 # ==============================
 
@@ -148,8 +150,8 @@ def rename_credit_columns(df: pd.DataFrame) -> pd.DataFrame:
         "NumberOfTimes90DaysLate":                "dpd_90p_cnt",
         "NumberRealEstateLoansOrLines":           "real_estate_cnt",
         "NumberOfDependents":                     "dependents_cnt",
-        "NumberOfTime30.59DaysPastDueNotWorse":   "dpd_30_59_cnt",
-        "NumberOfTime60.89DaysPastDueNotWorse":   "dpd_60_89_cnt",
+        "NumberOfTime30-59DaysPastDueNotWorse":   "dpd_30_59_cnt",
+        "NumberOfTime60-89DaysPastDueNotWorse":   "dpd_60_89_cnt",
     }
 
     df = safe_rename(df, rename_map)
@@ -215,6 +217,8 @@ def create_missing_flags(df: pd.DataFrame) -> pd.DataFrame:
         Adds two new columns that indicate whether monthly_income and
         dependents_cnt are missing. These flags are useful downstream as
         informative features in a model, since missingness may be non-random.
+        Note: dependents_missing is dropped at the end of the pipeline
+        (post-EDA decision). income_missing is retained.
 
     Args:
         df: Input DataFrame containing monthly_income and dependents_cnt.
@@ -289,6 +293,8 @@ def flag_util_outliers(
         Creates two boolean flag columns based on the raw util_unsecured values
         *before* any transformation, then caps and log-transforms the original column
         in-place. Flags are built first so the original signal is preserved.
+        Note: util_gt10 is dropped at the end of the pipeline (post-EDA decision).
+        Only util_gt1 is retained in the final feature set.
 
     Args:
         df: Input DataFrame containing util_unsecured.
@@ -309,7 +315,7 @@ def flag_util_outliers(
 
 
 # ==============================================================================
-# DPD (days past due) cleaning
+# DPD (days past due) cleaning and severity encoding
 # ==============================================================================
 
 def flag_and_clean_dpd(
@@ -326,6 +332,8 @@ def flag_and_clean_dpd(
         sentinels (e.g., 96, 98 are known Kaggle artefacts). Anomalous values in
         the DPD columns are then replaced with NaN to prevent them from
         distorting downstream statistics.
+        Note: dpd_any_gt90 is dropped at the end of the pipeline (post-EDA
+        decision).
 
     Args:
         df: Input DataFrame containing the DPD columns.
@@ -367,6 +375,58 @@ def flag_and_clean_dpd(
     log_info(
         f"DPD anomaly flag created (dpd_any_gt90). "
         f"Marked rows: {n_flagged} ({pct_flagged:.2f}%)."
+    )
+
+    return df
+
+
+def build_dpd_severity(df: pd.DataFrame) -> pd.DataFrame:
+    """Build an ordinal DPD severity score from the delinquency count columns.
+
+    Summary:
+        Encodes the worst delinquency bucket ever observed for each borrower
+        as a single ordinal integer. Intermediate ever-flags are created
+        internally and dropped before returning; the original DPD count columns
+        (dpd_30_59_cnt, dpd_60_89_cnt, dpd_90p_cnt) are dropped at the end of
+        the pipeline in COLS_TO_DROP (post-EDA decision).
+
+        Severity scale:
+            0 = no delinquency ever
+            1 = worst bucket is 30–59 days past due
+            2 = worst bucket is 60–89 days past due
+            3 = worst bucket is 90+ days past due
+
+        Assignments are applied in ascending order so that a borrower with
+        90+ DPD always ends up at level 3, regardless of lower-bucket counts.
+
+    Args:
+        df: Input DataFrame containing dpd_30_59_cnt, dpd_60_89_cnt, and
+            dpd_90p_cnt (after anomalous values have been set to NaN by
+            flag_and_clean_dpd).
+
+    Returns:
+        DataFrame with one new column:
+            - dpd_severity: int64 ordinal in {0, 1, 2, 3}.
+    """
+    df = df.copy()
+
+    # Intermediate ever-flags (dropped before return)
+    df["dpd_30_59_ever"] = (df["dpd_30_59_cnt"].fillna(0) > 0).astype(int)
+    df["dpd_60_89_ever"] = (df["dpd_60_89_cnt"].fillna(0) > 0).astype(int)
+    df["dpd_90p_ever"]   = (df["dpd_90p_cnt"].fillna(0)   > 0).astype(int)
+
+    # Ordinal severity: higher severity overwrites lower
+    df["dpd_severity"] = 0
+    df.loc[df["dpd_30_59_ever"] == 1, "dpd_severity"] = 1
+    df.loc[df["dpd_60_89_ever"] == 1, "dpd_severity"] = 2
+    df.loc[df["dpd_90p_ever"]   == 1, "dpd_severity"] = 3
+
+    df = df.drop(columns=["dpd_30_59_ever", "dpd_60_89_ever", "dpd_90p_ever"])
+
+    n_nonzero = int((df["dpd_severity"] > 0).sum())
+    log_info(
+        f"dpd_severity created. Borrowers with any delinquency: "
+        f"{n_nonzero} ({100 * n_nonzero / len(df):.2f}%)."
     )
 
     return df
@@ -434,6 +494,9 @@ def build_debt_ratio_features(df: pd.DataFrame) -> pd.DataFrame:
         income), a four-bucket ordinal factor, a capped version, and a log-
         transformed version. Bucket boundaries are chosen to separate plausible
         from implausible debt-ratio values.
+        Note: all columns produced here (dr_unreliable, dr_bucket,
+        debt_ratio_cap100, debt_ratio_cap100_log) plus the original debt_ratio
+        are dropped at the end of the pipeline (post-EDA decision).
 
     Args:
         df: Input DataFrame containing debt_ratio and income_missing
@@ -489,6 +552,9 @@ def build_income_features(
         and log-transformed versions. The extreme flag is derived from the raw
         (pre-imputation) values so that imputed observations are not falsely
         flagged.
+        Note: income_extreme_flag, monthly_income, and monthly_income_cap are
+        dropped at the end of the pipeline (post-EDA decision).
+        Only monthly_income_cap_log is retained in the final feature set.
 
     Args:
         df: Input DataFrame containing monthly_income.
@@ -506,8 +572,8 @@ def build_income_features(
 
     cap = float(df["monthly_income"].quantile(cap_p))
 
-    df["income_extreme_flag"]  = df["monthly_income"].notna() & df["monthly_income"].gt(cap)
-    df["monthly_income_cap"]   = df["monthly_income"].clip(upper=cap)
+    df["income_extreme_flag"]    = df["monthly_income"].notna() & df["monthly_income"].gt(cap)
+    df["monthly_income_cap"]     = df["monthly_income"].clip(upper=cap)
     df["monthly_income_cap_log"] = np.log1p(df["monthly_income_cap"])
 
     n_extreme = int(df["income_extreme_flag"].sum())
@@ -547,6 +613,8 @@ def build_real_estate_bucket(df: pd.DataFrame) -> pd.DataFrame:
         Groups the number of real estate loans / lines into six ordered buckets
         to reduce sparsity at the high end of the distribution. Bucket edges
         mirror the R implementation exactly.
+        Note: real_estate_cnt and real_estate_bucket are both dropped at the
+        end of the pipeline (post-EDA decision).
 
         Bucket mapping:
             - 0: count == 0
