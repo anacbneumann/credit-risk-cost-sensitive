@@ -1,13 +1,43 @@
-# Credit Risk Cost-Sensitive Modeling (Give Me Some Credit)
+# Credit Risk Cost-Sensitive Classification (Kaggle / GiveMeSomeCredit)
 
-This repository contains an end-to-end, **cost-sensitive** credit risk modeling project based on the classic *Give Me Some Credit* dataset.  
-The goal is to explore the data, clean and validate it, engineer features, train models, and evaluate decisions using a **business-aware cost perspective** (not only accuracy).
+Credit risk classification project focused on **cost-sensitive decision making**.  
+Goal: predict default (`target = default_2y`) and choose a **classification threshold** that minimises business cost.
 
-Link Kaggle: https://www.kaggle.com/datasets/brycecf/give-me-some-credit-dataset?resource=download
+## Business cost definition
 
-## Project Goals
-- Build a solid **EDA** with strong data quality checks (missing values, outliers, impossible values, duplicates).
-- Prepare a clean and reproducible preprocessing pipeline.
-- Train and compare baseline and stronger models (e.g., logistic regression, tree-based models).
-- Evaluate models using metrics suitable for imbalanced classification (ROC-AUC, PR-AUC, sensitivity/recall, etc.).
-- Add a **cost-sensitive layer** to support decision thresholds aligned with real-world risk trade-offs.
+We model the operational impact of classification errors using:
+
+- **C_FP = 1** → Reject a good payer (false positive)
+- **C_FN = 5** → Approve a defaulter (false negative, higher business loss)
+
+Total cost:
+
+\[
+\text{Cost} = C_{FP}\cdot FP + C_{FN}\cdot FN
+\]
+
+A theoretical reference threshold from the cost ratio is:
+
+\[
+t^* = \frac{C_{FP}}{C_{FP}+C_{FN}} = \frac{1}{6} \approx 0.1667
+\]
+
+> Note: the pipeline still searches the **empirical best threshold** on the held-out test set by sweeping thresholds (step = 0.01).
+
+## Final model
+
+The final pipeline trains an **XGBoost classifier** with fixed hyperparameters selected during experimentation / tuning:
+
+- `n_estimators = 500`
+- `max_depth = 3`
+- `min_child_weight = 15`
+- `learning_rate = 0.10`
+- `random_state = 51`
+
+The train/test split is stratified and reproducible (seed = 51).
+
+---
+
+## Repository structure
+
+Current structure (expected):

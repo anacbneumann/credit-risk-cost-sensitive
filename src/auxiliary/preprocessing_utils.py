@@ -4,10 +4,9 @@
 # Summary:
 #   Utility functions for the credit risk preprocessing pipeline.
 #   Covers logging, column renaming, deduplication, missingness flags,
-#   outlier capping, log transforms, rule-based anomaly flags, and
-#   derived feature builders — converted from the original R implementation
-#   to integrate cleanly into a Python-based pipeline (e.g. scikit-learn,
-#   pandas, or custom ETL workflows).
+#   outlier capping, log transforms, and rule-based anomaly detection.
+#   All functions here are pure data-cleaning operations — no analytical
+#   feature engineering. Derived feature builders live in feature_utils.py.
 #
 #   Dataset context: GiveMeSomeCredit (Kaggle) — binary classification for
 #   predicting serious delinquency within two years.
@@ -16,19 +15,12 @@
 #   from preprocessing_utils import (
 #       rename_credit_columns, create_missing_flags,
 #       flag_util_outliers, flag_and_clean_dpd,
-#       build_debt_ratio_features, build_income_features,
-#       build_dpd_severity,
+#       median_impute, cap_dependents,
 #   )
-#   df = rename_credit_columns(df)
-#   df = create_missing_flags(df)
-#   df = build_dpd_severity(df)
-#   ...
 # ==============================
 
 # ── Standard library ──────────────────────────────────────────────────────────
 import logging
-from datetime import datetime
-from typing import Optional
 
 # ── Third-party ───────────────────────────────────────────────────────────────
 import numpy as np
@@ -52,7 +44,7 @@ def log_info(msg: str) -> None:
 
     Summary:
         Thin wrapper around the standard library logger that emits an INFO-level
-        message, mirroring the behaviour of the original R log_info() function.
+        message.
 
     Args:
         msg: Human-readable message to be logged.
@@ -68,7 +60,7 @@ def log_warn(msg: str) -> None:
 
     Summary:
         Thin wrapper around the standard library logger that emits a WARNING-level
-        message, mirroring the behaviour of the original R log_warn() function.
+        message.
 
     Args:
         msg: Human-readable warning message to be logged.
@@ -87,7 +79,7 @@ def safe_rename(df: pd.DataFrame, rename_map: dict[str, str]) -> pd.DataFrame:
     """Rename DataFrame columns using a mapping, silently skipping missing keys.
 
     Summary:
-        Only columns present in *df* are renamed; columns not found in the mapping
+        Only columns present in df are renamed; columns absent from the mapping
         are left untouched and no error is raised.
 
     Args:
@@ -96,8 +88,7 @@ def safe_rename(df: pd.DataFrame, rename_map: dict[str, str]) -> pd.DataFrame:
             e.g. {"OldName": "new_name"}.
 
     Returns:
-        DataFrame with the applicable columns renamed. The original DataFrame is
-        not modified in-place; a copy is returned.
+        DataFrame with applicable columns renamed. Original is not modified.
     """
     present = {k: v for k, v in rename_map.items() if k in df.columns}
     return df.rename(columns=present)
@@ -108,14 +99,14 @@ def standardize_column_names(df: pd.DataFrame) -> pd.DataFrame:
 
     Summary:
         If no column named "id" already exists, the first column is renamed
-        to "id". This mirrors the R implementation's fallback behaviour.
+        to "id". Mirrors the R implementation's fallback behaviour.
 
     Args:
         df: Input DataFrame.
 
     Returns:
-        DataFrame where df.columns[0] has been renamed to "id" when an
-        "id" column was not already present.
+        DataFrame where df.columns[0] is renamed to "id" when an "id" column
+        was not already present.
     """
     if "id" not in df.columns:
         new_cols = list(df.columns)
@@ -129,9 +120,9 @@ def rename_credit_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Rename raw GiveMeSomeCredit Kaggle column names to snake_case equivalents.
 
     Summary:
-        Applies a fixed mapping from the original Kaggle column names (PascalCase /
-        mixed) to concise, consistent snake_case names. Emits a warning listing any
-        expected columns that are absent after the rename.
+        Applies a fixed mapping from the original Kaggle column names (PascalCase
+        / mixed) to concise, consistent snake_case names. Emits a warning listing
+        any expected columns absent after the rename.
 
     Args:
         df: Input DataFrame containing original Kaggle column names.
@@ -183,18 +174,17 @@ def deduplicate_rows_ignoring_id(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
         keeps the first occurrence, and logs the count and percentage removed.
 
     Args:
-        df: Input DataFrame. Must contain an "id" column (or at least one
-            non-id column) for the comparison to be meaningful.
+        df: Input DataFrame. Must contain an "id" column.
 
     Returns:
-        A tuple (df_dedup, dup_n) where:
-            - df_dedup is the deduplicated DataFrame.
-            - dup_n is the number of duplicate rows that were removed.
+        Tuple (df_dedup, dup_n) where:
+            - df_dedup: deduplicated DataFrame.
+            - dup_n: number of duplicate rows removed.
     """
     key_cols = [c for c in df.columns if c != "id"]
     dup_mask = df.duplicated(subset=key_cols, keep="first")
 
-    dup_n = int(dup_mask.sum())
+    dup_n   = int(dup_mask.sum())
     dup_pct = 100 * dup_n / len(df)
 
     log_info(
@@ -202,8 +192,7 @@ def deduplicate_rows_ignoring_id(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
         "Keeping first occurrence."
     )
 
-    df_dedup = df[~dup_mask].reset_index(drop=True)
-    return df_dedup, dup_n
+    return df[~dup_mask].reset_index(drop=True), dup_n
 
 
 # ==============================================================================
@@ -214,17 +203,17 @@ def create_missing_flags(df: pd.DataFrame) -> pd.DataFrame:
     """Create boolean missingness indicator columns for selected features.
 
     Summary:
-        Adds two new columns that indicate whether monthly_income and
-        dependents_cnt are missing. These flags are useful downstream as
-        informative features in a model, since missingness may be non-random.
-        Note: dependents_missing is dropped at the end of the pipeline
-        (post-EDA decision). income_missing is retained.
+        Adds two columns indicating whether monthly_income and dependents_cnt
+        are missing. These flags are informative since missingness may be
+        non-random in this dataset.
+        Note: dependents_missing is dropped at the end of the features pipeline
+        (post-EDA decision). income_missing is retained as a model feature.
 
     Args:
         df: Input DataFrame containing monthly_income and dependents_cnt.
 
     Returns:
-        DataFrame with two additional columns:
+        DataFrame with two additional boolean columns:
             - income_missing: True where monthly_income is NaN.
             - dependents_missing: True where dependents_cnt is NaN.
     """
@@ -241,18 +230,16 @@ def median_impute(
     """Replace NaN values with the column median.
 
     Summary:
-        Computes the median of *x* (ignoring NaNs) and fills missing entries.
+        Computes the median of x (ignoring NaNs) and fills missing entries.
         Optionally rounds the result and casts to Int64 (nullable integer),
-        which preserves the integer semantics of count-type features.
+        which preserves integer semantics of count-type features.
 
     Args:
         x: Numeric pandas Series to impute.
-        round_to_int: If True, the imputed values are rounded and the
-            Series is cast to Int64 (nullable integer dtype).
+        round_to_int: If True, imputed values are rounded and cast to Int64.
 
     Returns:
-        Series with NaN values replaced by the column median, optionally
-        rounded and cast to integer.
+        Series with NaN values replaced by the column median.
     """
     med = x.median(skipna=True)
     x = x.fillna(med)
@@ -266,19 +253,18 @@ def median_impute(
 # ==============================================================================
 
 def cap_and_log1p(x: pd.Series, cap_value: float) -> pd.Series:
-    """Cap a numeric Series at *cap_value* and apply a log1p transform.
+    """Cap a numeric Series at cap_value and apply a log1p transform.
 
     Summary:
-        First clips values above *cap_value*, then applies log1p to compress
-        the right tail. Equivalent to log1p(pmin(x, cap_value)) in R.
+        Clips values above cap_value, then applies log1p to compress the right
+        tail. Equivalent to log1p(pmin(x, cap_value)) in R.
 
     Args:
         x: Numeric pandas Series to transform.
-        cap_value: Upper threshold; values above this are clipped to *cap_value*
-            before the log transform is applied.
+        cap_value: Upper threshold; values above this are clipped before log.
 
     Returns:
-        Numeric Series equal to np.log1p(x.clip(upper=cap_value)).
+        Series equal to np.log1p(x.clip(upper=cap_value)).
     """
     return np.log1p(x.clip(upper=cap_value))
 
@@ -290,16 +276,15 @@ def flag_util_outliers(
     """Flag utilization outliers and apply a capped log1p transform.
 
     Summary:
-        Creates two boolean flag columns based on the raw util_unsecured values
-        *before* any transformation, then caps and log-transforms the original column
-        in-place. Flags are built first so the original signal is preserved.
-        Note: util_gt10 is dropped at the end of the pipeline (post-EDA decision).
-        Only util_gt1 is retained in the final feature set.
+        Creates two boolean flag columns from the raw util_unsecured values
+        before any transformation, then caps and log-transforms the column
+        in-place. Flags are built first to preserve the original signal.
+        Note: util_gt10 is dropped at the end of the features pipeline
+        (post-EDA decision). util_gt1 is retained.
 
     Args:
         df: Input DataFrame containing util_unsecured.
-        util_cap: Upper cap threshold for the transformation. Values above this
-            are clipped before the log1p transform. Defaults to 10.
+        util_cap: Upper cap threshold for the transformation. Defaults to 10.
 
     Returns:
         DataFrame with three changes:
@@ -308,14 +293,33 @@ def flag_util_outliers(
             - util_unsecured: replaced with log1p(clip(util_unsecured, util_cap)).
     """
     df = df.copy()
-    df["util_gt1"]  = df["util_unsecured"].gt(1)  & df["util_unsecured"].notna()
+    df["util_gt1"]  = df["util_unsecured"].gt(1)        & df["util_unsecured"].notna()
     df["util_gt10"] = df["util_unsecured"].gt(util_cap) & df["util_unsecured"].notna()
     df["util_unsecured"] = cap_and_log1p(df["util_unsecured"], util_cap)
     return df
 
 
+def cap_dependents(df: pd.DataFrame, cap_value: int = 10) -> pd.DataFrame:
+    """Cap dependents_cnt at a maximum value, preserving NaN.
+
+    Summary:
+        Clips dependents_cnt to cap_value to reduce the influence of rare
+        high-count observations. Missing values are left unchanged.
+
+    Args:
+        df: Input DataFrame containing dependents_cnt.
+        cap_value: Maximum allowed value for dependents count. Defaults to 10.
+
+    Returns:
+        DataFrame with dependents_cnt clipped at cap_value; NaN preserved.
+    """
+    df = df.copy()
+    df["dependents_cnt"] = df["dependents_cnt"].clip(upper=cap_value)
+    return df
+
+
 # ==============================================================================
-# DPD (days past due) cleaning and severity encoding
+# DPD (days past due) anomaly detection and cleaning
 # ==============================================================================
 
 def flag_and_clean_dpd(
@@ -327,28 +331,27 @@ def flag_and_clean_dpd(
     """Create a unified delinquency anomaly flag and sanitize DPD columns.
 
     Summary:
-        Marks rows as anomalous when any DPD column contains a value that is
-        greater than or equal to *threshold* or matches one of the *special_values*
-        sentinels (e.g., 96, 98 are known Kaggle artefacts). Anomalous values in
-        the DPD columns are then replaced with NaN to prevent them from
-        distorting downstream statistics.
-        Note: dpd_any_gt90 is dropped at the end of the pipeline (post-EDA
-        decision).
+        Marks rows as anomalous when any DPD column contains a value >= threshold
+        or matches a known sentinel value (e.g. 96, 98 are Kaggle artefacts).
+        Anomalous values are then replaced with NaN to prevent distortion of
+        downstream statistics and feature builders.
+        Note: dpd_any_gt90 is dropped at the end of the features pipeline
+        (post-EDA decision). The raw DPD count columns are consumed by
+        feature_utils.build_dpd_severity and are dropped there.
 
     Args:
         df: Input DataFrame containing the DPD columns.
         dpd_cols: Column names to inspect. Defaults to
             ["dpd_30_59_cnt", "dpd_60_89_cnt", "dpd_90p_cnt"].
-        special_values: Sentinel values that indicate data anomalies independent
-            of the *threshold*. Defaults to [96, 98].
-        threshold: Values greater than or equal to this number are treated as
-            anomalous. Defaults to 90.
+        special_values: Sentinel values indicating data anomalies. Defaults to
+            [96, 98].
+        threshold: Values >= this number are treated as anomalous. Defaults to 90.
 
     Returns:
         DataFrame with:
-            - dpd_any_gt90: boolean row-level flag; True if any DPD column
-              for that row was anomalous.
-            - All columns in *dpd_cols* with anomalous values set to NaN.
+            - dpd_any_gt90: boolean row-level flag (True if any DPD column
+              was anomalous for that row).
+            - All columns in dpd_cols with anomalous values replaced by NaN.
     """
     if dpd_cols is None:
         dpd_cols = ["dpd_30_59_cnt", "dpd_60_89_cnt", "dpd_90p_cnt"]
@@ -370,63 +373,11 @@ def flag_and_clean_dpd(
 
     df["dpd_any_gt90"] = flag
 
-    n_flagged = int(flag.sum())
+    n_flagged   = int(flag.sum())
     pct_flagged = 100 * flag.mean()
     log_info(
         f"DPD anomaly flag created (dpd_any_gt90). "
         f"Marked rows: {n_flagged} ({pct_flagged:.2f}%)."
-    )
-
-    return df
-
-
-def build_dpd_severity(df: pd.DataFrame) -> pd.DataFrame:
-    """Build an ordinal DPD severity score from the delinquency count columns.
-
-    Summary:
-        Encodes the worst delinquency bucket ever observed for each borrower
-        as a single ordinal integer. Intermediate ever-flags are created
-        internally and dropped before returning; the original DPD count columns
-        (dpd_30_59_cnt, dpd_60_89_cnt, dpd_90p_cnt) are dropped at the end of
-        the pipeline in COLS_TO_DROP (post-EDA decision).
-
-        Severity scale:
-            0 = no delinquency ever
-            1 = worst bucket is 30–59 days past due
-            2 = worst bucket is 60–89 days past due
-            3 = worst bucket is 90+ days past due
-
-        Assignments are applied in ascending order so that a borrower with
-        90+ DPD always ends up at level 3, regardless of lower-bucket counts.
-
-    Args:
-        df: Input DataFrame containing dpd_30_59_cnt, dpd_60_89_cnt, and
-            dpd_90p_cnt (after anomalous values have been set to NaN by
-            flag_and_clean_dpd).
-
-    Returns:
-        DataFrame with one new column:
-            - dpd_severity: int64 ordinal in {0, 1, 2, 3}.
-    """
-    df = df.copy()
-
-    # Intermediate ever-flags (dropped before return)
-    df["dpd_30_59_ever"] = (df["dpd_30_59_cnt"].fillna(0) > 0).astype(int)
-    df["dpd_60_89_ever"] = (df["dpd_60_89_cnt"].fillna(0) > 0).astype(int)
-    df["dpd_90p_ever"]   = (df["dpd_90p_cnt"].fillna(0)   > 0).astype(int)
-
-    # Ordinal severity: higher severity overwrites lower
-    df["dpd_severity"] = 0
-    df.loc[df["dpd_30_59_ever"] == 1, "dpd_severity"] = 1
-    df.loc[df["dpd_60_89_ever"] == 1, "dpd_severity"] = 2
-    df.loc[df["dpd_90p_ever"]   == 1, "dpd_severity"] = 3
-
-    df = df.drop(columns=["dpd_30_59_ever", "dpd_60_89_ever", "dpd_90p_ever"])
-
-    n_nonzero = int((df["dpd_severity"] > 0).sum())
-    log_info(
-        f"dpd_severity created. Borrowers with any delinquency: "
-        f"{n_nonzero} ({100 * n_nonzero / len(df):.2f}%)."
     )
 
     return df
@@ -442,31 +393,30 @@ def clean_age(
     min_age: int = 18,
     max_age: int = 120,
 ) -> pd.DataFrame:
-    """Clean age_years: optionally remove zero-age rows and null out-of-range values.
+    """Clean age_years: remove zero-age rows and null out-of-range values.
 
     Summary:
-        Two-step cleaning: (1) optionally drops rows where age_years == 0 —
-        which are assumed to be data entry errors — and (2) sets implausible ages
-        (below *min_age* or above *max_age*) to NaN.
+        Two-step cleaning: (1) optionally drops rows where age_years == 0,
+        assumed to be data entry errors; (2) sets implausible ages (below
+        min_age or above max_age) to NaN.
 
     Args:
         df: Input DataFrame containing age_years.
-        remove_zero: If True (default), rows where age_years == 0 are
-            dropped entirely rather than nulled out.
-        min_age: Minimum plausible age; values strictly below this are set to
-            NaN. Defaults to 18.
-        max_age: Maximum plausible age; values strictly above this are set to
-            NaN. Defaults to 120.
+        remove_zero: If True (default), rows where age_years == 0 are dropped.
+        min_age: Minimum plausible age; values below this are set to NaN.
+            Defaults to 18.
+        max_age: Maximum plausible age; values above this are set to NaN.
+            Defaults to 120.
 
     Returns:
         DataFrame with cleaned age_years. Row count may decrease when
-        *remove_zero* is True.
+        remove_zero is True.
     """
     df = df.copy()
 
     if remove_zero:
-        before = len(df)
-        df = df[df["age_years"] != 0].reset_index(drop=True)
+        before  = len(df)
+        df      = df[df["age_years"] != 0].reset_index(drop=True)
         removed = before - len(df)
         log_info(f"Removed rows where age_years == 0: {removed}")
 
@@ -477,177 +427,6 @@ def clean_age(
     df.loc[out_range, "age_years"] = np.nan
     log_info(
         f"Set age_years out of range [{min_age}, {max_age}] to NaN: {n_out}"
-    )
-
-    return df
-
-
-# ==============================================================================
-# Derived feature builders
-# ==============================================================================
-
-def build_debt_ratio_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Build derived features from debt_ratio.
-
-    Summary:
-        Creates an unreliability flag (extreme debt ratio combined with missing
-        income), a four-bucket ordinal factor, a capped version, and a log-
-        transformed version. Bucket boundaries are chosen to separate plausible
-        from implausible debt-ratio values.
-        Note: all columns produced here (dr_unreliable, dr_bucket,
-        debt_ratio_cap100, debt_ratio_cap100_log) plus the original debt_ratio
-        are dropped at the end of the pipeline (post-EDA decision).
-
-    Args:
-        df: Input DataFrame containing debt_ratio and income_missing
-            (the latter is created by :func:`create_missing_flags`).
-
-    Returns:
-        DataFrame with four additional columns:
-            - dr_unreliable: True when income_missing is True AND
-              debt_ratio > 100.
-            - dr_bucket: ordinal category in {0, 1, 2, 3} based on the
-              value of debt_ratio (0 = ≤100, 1 = 101–1 000, 2 = 1 001–10 000,
-              3 = >10 000).
-            - debt_ratio_cap100: debt_ratio clipped at 100.
-            - debt_ratio_cap100_log: log1p(debt_ratio_cap100).
-    """
-    df = df.copy()
-
-    df["dr_unreliable"] = (
-        df["income_missing"]
-        & df["debt_ratio"].notna()
-        & df["debt_ratio"].gt(100)
-    )
-
-    conditions = [
-        df["debt_ratio"].isna(),
-        df["debt_ratio"].le(100),
-        df["debt_ratio"].gt(100)  & df["debt_ratio"].le(1_000),
-        df["debt_ratio"].gt(1_000) & df["debt_ratio"].le(10_000),
-        df["debt_ratio"].gt(10_000),
-    ]
-    choices = [np.nan, 0, 1, 2, 3]
-    df["dr_bucket"] = pd.Categorical(
-        np.select(conditions, choices, default=np.nan),
-        categories=[0, 1, 2, 3],
-        ordered=True,
-    )
-
-    df["debt_ratio_cap100"]     = df["debt_ratio"].clip(upper=100)
-    df["debt_ratio_cap100_log"] = np.log1p(df["debt_ratio_cap100"])
-
-    return df
-
-
-def build_income_features(
-    df: pd.DataFrame,
-    cap_p: float = 0.995,
-) -> pd.DataFrame:
-    """Build derived features from monthly_income.
-
-    Summary:
-        Computes an upper cap at the *cap_p* percentile of the raw income
-        distribution, flags rows above that cap as extreme, then creates capped
-        and log-transformed versions. The extreme flag is derived from the raw
-        (pre-imputation) values so that imputed observations are not falsely
-        flagged.
-        Note: income_extreme_flag, monthly_income, and monthly_income_cap are
-        dropped at the end of the pipeline (post-EDA decision).
-        Only monthly_income_cap_log is retained in the final feature set.
-
-    Args:
-        df: Input DataFrame containing monthly_income.
-        cap_p: Quantile level used to compute the income cap, e.g. 0.995
-            means the 99.5th percentile. Defaults to 0.995.
-
-    Returns:
-        DataFrame with three additional columns:
-            - income_extreme_flag: True when raw monthly_income exceeds
-              the *cap_p* percentile.
-            - monthly_income_cap: monthly_income clipped at the percentile cap.
-            - monthly_income_cap_log: log1p(monthly_income_cap).
-    """
-    df = df.copy()
-
-    cap = float(df["monthly_income"].quantile(cap_p))
-
-    df["income_extreme_flag"]    = df["monthly_income"].notna() & df["monthly_income"].gt(cap)
-    df["monthly_income_cap"]     = df["monthly_income"].clip(upper=cap)
-    df["monthly_income_cap_log"] = np.log1p(df["monthly_income_cap"])
-
-    n_extreme = int(df["income_extreme_flag"].sum())
-    pct_extreme = 100 * df["income_extreme_flag"].mean()
-    log_info(
-        f"Income cap set to p{cap_p:.3f} = {cap:.2f}. "
-        f"Extreme flagged rows: {n_extreme} ({pct_extreme:.2f}%)."
-    )
-
-    return df
-
-
-def cap_dependents(df: pd.DataFrame, cap_value: int = 10) -> pd.DataFrame:
-    """Cap dependents_cnt at a maximum value, preserving NaN.
-
-    Summary:
-        Clips dependents_cnt to *cap_value* to reduce the influence of rare
-        high-count observations. Missing values are left unchanged.
-
-    Args:
-        df: Input DataFrame containing dependents_cnt.
-        cap_value: Maximum allowed value for dependents count. Defaults to 10.
-
-    Returns:
-        DataFrame with dependents_cnt clipped at *cap_value*; NaN entries
-        are preserved as-is.
-    """
-    df = df.copy()
-    df["dependents_cnt"] = df["dependents_cnt"].clip(upper=cap_value)
-    return df
-
-
-def build_real_estate_bucket(df: pd.DataFrame) -> pd.DataFrame:
-    """Discretize real_estate_cnt into an ordinal bucket feature.
-
-    Summary:
-        Groups the number of real estate loans / lines into six ordered buckets
-        to reduce sparsity at the high end of the distribution. Bucket edges
-        mirror the R implementation exactly.
-        Note: real_estate_cnt and real_estate_bucket are both dropped at the
-        end of the pipeline (post-EDA decision).
-
-        Bucket mapping:
-            - 0: count == 0
-            - 1: count == 1
-            - 2: count == 2
-            - 3: count in [3, 5]
-            - 4: count in [6, 10]
-            - 5: count >= 11
-
-    Args:
-        df: Input DataFrame containing real_estate_cnt.
-
-    Returns:
-        DataFrame with an additional real_estate_bucket column encoded as an
-        ordered pd.Categorical with levels [0, 1, 2, 3, 4, 5]. Rows
-        where real_estate_cnt is NaN receive NaN in the bucket column.
-    """
-    df = df.copy()
-
-    bins   = [-np.inf, 0, 1, 2, 5, 10, np.inf]
-    labels = [0, 1, 2, 3, 4, 5]
-
-    df["real_estate_bucket"] = pd.cut(
-        df["real_estate_cnt"],
-        bins=bins,
-        labels=labels,
-        right=True,
-    ).astype("Int64")
-
-    df["real_estate_bucket"] = pd.Categorical(
-        df["real_estate_bucket"],
-        categories=labels,
-        ordered=True,
     )
 
     return df
