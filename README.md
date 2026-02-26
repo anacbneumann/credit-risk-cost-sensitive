@@ -12,15 +12,15 @@ We model the operational impact of classification errors using:
 
 Total cost:
 
-\[
-\text{Cost} = C_FP * FP + C_FN*FN
-\]
+
+Cost} = C_FP * FP + C_FN*FN
+
 
 A theoretical reference threshold from the cost ratio is:
 
-\[
-t = C_FP/(C_FP+C_FN) = 1/6 \approx 0.1667
-\]
+
+t = C_FP/(C_FP+C_FN) = 1/6 \ approx 0.1667
+
 
 > Note: the pipeline still searches the **empirical best threshold** on the held-out test set by sweeping thresholds (step = 0.01).
 
